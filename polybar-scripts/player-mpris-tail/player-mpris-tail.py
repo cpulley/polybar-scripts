@@ -13,7 +13,7 @@ from gi.repository import GLib
 DBusGMainLoop(set_as_default=True)
 
 
-FORMAT_STRING = '{icon} {artist} - {title}'
+FORMAT_STRING = '{playericon} {artist} - {title}'
 FORMAT_REGEX = re.compile(r'(\{:(?P<tag>.*?)(:(?P<format>[wt])(?P<formatlen>\d+))?:(?P<text>.*?):\})', re.I)
 FORMAT_TAG_REGEX = re.compile(r'(?P<format>[wt])(?P<formatlen>\d+)')
 SAFE_TAG_REGEX = re.compile(r'[{}]')
@@ -75,6 +75,14 @@ class PlayerManager:
             if owner == player_bus_owner:
                 return player_bus_name
 
+    def busList(self):
+        player_bus_list = []
+        player_bus_names = [ bus_name for bus_name in self._session_bus.list_names() if self.busNameIsAPlayer(bus_name) ]
+        for player_bus_name in player_bus_names:
+            player_bus_owner = self._session_bus.get_name_owner(player_bus_name)
+            player_bus_list.append(player_bus_name)
+        return player_bus_list
+
     def busNameIsAPlayer(self, bus_name):
         return bus_name.startswith('org.mpris.MediaPlayer2') and bus_name.split('.')[3] not in self.blacklist
 
@@ -87,7 +95,7 @@ class PlayerManager:
             self.printQueue()
 
     def addPlayer(self, bus_name, owner = None):
-        player = Player(self._session_bus, bus_name, owner = owner, connect = self._connect, _print = self.print)
+        player = Player(self._session_bus, bus_name, self.busList, owner = owner, connect = self._connect, _print = self.print)
         self.players[player.owner] = player
 
     def removePlayer(self, owner):
@@ -104,7 +112,7 @@ class PlayerManager:
                 self.players[players[0]].printStatus()
 
     def changePlayerOwner(self, bus_name, old_owner, new_owner):
-        player = Player(self._session_bus, bus_name, owner = new_owner, connect = self._connect, _print = self.print)
+        player = Player(self._session_bus, bus_name, self.busList, owner = new_owner, connect = self._connect, _print = self.print)
         self.players[new_owner] = player
         del self.players[old_owner]
 
@@ -149,11 +157,13 @@ class PlayerManager:
 
 
 class Player:
-    def __init__(self, session_bus, bus_name, owner = None, connect = True, _print = None):
+    def __init__(self, session_bus, bus_name, player_bus_list, owner = None, connect = True, _print = None):
         self._session_bus = session_bus
         self.bus_name = bus_name
         self._disconnecting = False
         self.__print = _print
+        self.playerIconList = []
+        self.player_bus_list = player_bus_list
 
         self.metadata = {
             'artist' : '',
@@ -265,7 +275,7 @@ class Player:
     def _parseMetadata(self):
         if self._metadata != None:
             artist = _getProperty(self._metadata, 'xesam:artist', [''])
-            # If we get a string, artist[0] returns the first character.
+            # This HAS to be a list, otherwise artist[0] returns the first character.
             if type(artist) is str:
                 artist = [artist]
             if artist != None and len(artist):
@@ -276,7 +286,7 @@ class Player:
                     # Note: This only grabs the first artist
                     self.metadata['artist'] = re.sub(SAFE_TAG_REGEX, """\1\1""", artists[0])
                 else:
-                    self.metadata['artist'] = '';
+                    self.metadata['artist'] = ''
             self.metadata['album']  = re.sub(SAFE_TAG_REGEX, """\1\1""", _getProperty(self._metadata, 'xesam:album', ''))
             self.metadata['title']  = re.sub(SAFE_TAG_REGEX, """\1\1""", _getProperty(self._metadata, 'xesam:title', ''))
             self.metadata['track']  = _getProperty(self._metadata, 'xesam:trackNumber', '')
@@ -284,7 +294,7 @@ class Player:
             if not len(length):
                 length = str(_getProperty(self._metadata, 'mpris:length', ''))
             if len(length):
-                # If we get a string formatted as a float, int(length) will ValueError, but int(float(length)) will not.
+                # This has to be typecast as a float. Otherwise, can we get a string representation of a float → ValueError
                 self.metadata['length'] = int(float(length))
             else:
                 self.metadata['length'] = 0
@@ -402,6 +412,26 @@ class Player:
         else:
             return ''
 
+    def getPlayerIcon(self, bus_name):
+        if bus_name == "spotify":
+            return " %{T5}%{T1} "
+        elif bus_name == "smplayer":
+            return " %{T4}%{T1} "
+        elif bus_name == "chromium":
+            return " %{T4}%{T1} "
+        else:
+            return " %{T5}%{T1} "
+
+    def getPlayerIconList(self):
+        player_icon_list = ''
+        for player in self.player_bus_list():
+            icon = self.getPlayerIcon(player.split('.')[3])
+            if player == self.bus_name:
+                player_icon_list = player_icon_list + "%%{F#666666}%s%%{F}" % icon
+            else:
+                player_icon_list = player_icon_list + "%%{F#BBBBBB}%s%%{F}" % icon
+        return "%s " % player_icon_list
+
     def printStatus(self):
         if self.status in [ 'playing', 'paused' ]:
             metadata = { **self.metadata, 'icon': self.icon, 'icon-reversed': self.icon_reversed }
@@ -414,6 +444,7 @@ class Player:
                 text = re.sub(r'􏿿p􏿿(.*?)􏿿p􏿿(.*?)􏿿p􏿿(.*?)􏿿p􏿿', r'%{\1}\2%{\3}', text.format_map(CleanSafeDict(**metadata)))
             except:
                 print("Invalid format string")
+            text = str(self.getPlayerIconList()) + text
             self._print(text)
         else:
             self._print(ICON_STOPPED)
@@ -490,9 +521,9 @@ parser.add_argument('-b', '--blacklist', help="ignore a player by it's bus name.
                     default=[])
 parser.add_argument('-f', '--format', default='{icon} {:artist:{artist} - :}{:title:{title}:}{:-title:{filename}:}')
 parser.add_argument('--truncate-text', default='…')
-parser.add_argument('--icon-playing', default='⏵')
-parser.add_argument('--icon-paused', default='⏸')
-parser.add_argument('--icon-stopped', default='⏹')
+parser.add_argument('--icon-playing', default='')
+parser.add_argument('--icon-paused', default='')
+parser.add_argument('--icon-stopped', default='')
 parser.add_argument('--icon-none', default='')
 args = parser.parse_args()
 
